@@ -1,9 +1,19 @@
 {
   "compilerOptions": {
-    "target": "es2020",
-    "module": "commonjs",
-    "strict": true,
-    "esModuleInterop": true,
-    "skipLibCheck": true
-  }
+    "target": "ES2020",                       // Versão do JS de saída, ES2020 funciona bem para Node.js atual
+    "module": "CommonJS",                     // Módulos no padrão CommonJS, padrão do Node.js
+    "strict": true,                           // Ativa checagem rigorosa de tipos
+    "esModuleInterop": true,                  // Permite importar módulos CommonJS como default (útil para libs antigas)
+    "skipLibCheck": true,                     // Ignora erros nos arquivos de declaração de node_modules (resolve erros com long)
+    "forceConsistentCasingInFileNames": true,
+    "outDir": "./dist",                       // Pasta onde os arquivos JS compilados irão
+    "rootDir": "./",                          // Pasta raiz do seu código TS
+    "resolveJsonModule": true,                // Para importar arquivos JSON se precisar no futuro
+    "moduleResolution": "node",
+    "allowJs": false,
+    "noEmitOnError": true,
+    "strictNullChecks": true
+  },
+  "include": ["app.ts"],                      // Arquivos TS para compilar
+  "exclude": ["node_modules"]
 }

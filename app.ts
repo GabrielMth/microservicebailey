@@ -5,26 +5,25 @@ import makeWASocket, {
   fetchLatestBaileysVersion,
   makeCacheableSignalKeyStore,
   useMultiFileAuthState,
-  isJidNewsletter
+  isJidNewsletter,
 } from 'baileys'
 import NodeCache from '@cacheable/node-cache'
 import P from 'pino'
 import { Boom } from '@hapi/boom'
-import readline from 'readline'
-import QRCode from 'qrcode'
+import * as QRCode from 'qrcode'
+import fs from 'fs'
 
-const logger = P({ timestamp: () => `,"time":"${new Date().toJSON()}"` }, P.destination('./wa-logs.txt'))
-logger.level = 'trace'
+const logger = P({ level: 'error', timestamp: () => `,"time":"${new Date().toJSON()}"` }, P.destination('./wa-logs.txt'))
 
-const msgRetryCounterCache = new NodeCache()
+const replyCache = new NodeCache({ stdTTL: 5000 })
 
-const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
-const question = (text: string) => new Promise<string>((resolve) => rl.question(text, resolve))
+const isIgnoredJid = (jid: string) =>
+  jid.endsWith('@g.us') || jid.endsWith('@broadcast') || jid.endsWith('@channel') || isJidNewsletter(jid)
 
 const startSock = async () => {
   const { state, saveCreds } = await useMultiFileAuthState('baileys_auth_info')
-  const { version, isLatest } = await fetchLatestBaileysVersion()
-  console.log(`using WA v${version.join('.')}, isLatest: ${isLatest}`)
+  const { version } = await fetchLatestBaileysVersion()
+  console.log(`Usando WA v${version.join('.')}`)
 
   const sock = makeWASocket({
     version,
@@ -33,34 +32,9 @@ const startSock = async () => {
       creds: state.creds,
       keys: makeCacheableSignalKeyStore(state.keys, logger),
     },
-    msgRetryCounterCache,
   })
 
-  sock.ev.on('connection.update', async (update) => {
-    const { connection, lastDisconnect, qr } = update
-
-    if (qr) {
-      // Imprime QR no terminal para escanear
-      console.log(await QRCode.toString(qr, { type: 'terminal', small: true }))
-    }
-
-    if (connection === 'close') {
-      const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode
-      if (statusCode !== DisconnectReason.loggedOut) {
-        console.log('Reconectando...')
-        startSock()
-      } else {
-        console.log('Você foi desconectado (logout).')
-      }
-    } else if (connection === 'open') {
-      console.log('Conectado com sucesso!')
-    }
-  })
-
-  sock.ev.on('creds.update', saveCreds)
-
-  // Função para enviar mensagem simulando "digitando"
-  async function sendMessageWTyping(jid: string, message: AnyMessageContent) {
+  const sendMessageWTyping = async (jid: string, message: AnyMessageContent) => {
     await sock.presenceSubscribe(jid)
     await delay(500)
     await sock.sendPresenceUpdate('composing', jid)
@@ -69,36 +43,67 @@ const startSock = async () => {
     await sock.sendMessage(jid, message)
   }
 
-  const lastReplyDateMap = new Map<string, string>()
+  sock.ev.on('connection.update', async ({ connection, lastDisconnect, qr }) => {
+    if (qr) console.log(await QRCode.toString(qr, { type: 'terminal', small: true }))
+
+    if (connection === 'close') {
+      const code = (lastDisconnect?.error as Boom)?.output?.statusCode
+      if (code === DisconnectReason.loggedOut) {
+        console.log('Desconectado. Limpando dados...')
+        fs.rmSync('baileys_auth_info', { recursive: true, force: true })
+      }
+      await delay(2000)
+      return startSock()
+    }
+
+    if (connection === 'open') console.log('Conectado com sucesso!')
+  })
+
+  sock.ev.on('creds.update', saveCreds)
 
   sock.ev.on('messages.upsert', async (upsert) => {
     if (upsert.type !== 'notify') return
 
     for (const msg of upsert.messages) {
-      if (!msg.key.fromMe && !isJidNewsletter(msg.key.remoteJid!)) {
-        const sender = msg.key.remoteJid!
+      const sender = msg.key.remoteJid!
+      if (msg.key.fromMe || isIgnoredJid(sender) || replyCache.has(sender)) continue
 
-        // Pega a data de hoje no formato YYYY-MM-DD
-        const today = new Date().toISOString().slice(0, 10)
+      await sock.readMessages([msg.key])
+      const now = new Date()
+      const hour = now.getHours()
+      const pushName = msg.pushName || "Querido cliente"
 
-        const lastReplyDate = lastReplyDateMap.get(sender)
+      if (hour >= 8 && hour < 18) {
+        const greeting = hour < 12 ? `☀ Bom dia, ${pushName}!` : `🌤 Boa tarde, ${pushName}!`
+        const intro = `${greeting}
 
-        if (lastReplyDate !== today) {
-          // Marca mensagem como lida
-          await sock.readMessages([msg.key])
+Agradecemos por entrar em contato com a Casa de Ração AuQueMia 🏡🐶😺❤.
 
-          // Envia mensagem padrão
-          const replyText = 'Olá! Você entrou em contato com a nossa loja.\nAcesse nosso cardápio digital em: https://minhaloja.com/cardapio'
-          await sendMessageWTyping(sender, { text: replyText })
+Oferecemos **entrega grátis** para sua comodidade.
+Nosso horário de atendimento é
+*Segunda-Feira* | *Domingo* 
+a partir das *08h00* às *18h00*.`
 
-          // Atualiza a última data de resposta para hoje
-          lastReplyDateMap.set(sender, today)
+        const followUp = `Olá! Meu nome é Rita e estou à disposição.`
 
-          console.log(`Mensagem respondida para ${sender}`)
-        } else {
-          console.log(`Já respondeu para ${sender} hoje, ignorando.`)
-        }
+        await sendMessageWTyping(sender, { text: intro })
+        await delay(1000)
+        await sendMessageWTyping(sender, { text: followUp })
+      } else {
+        const closed = `Olá, ${pushName}!
+
+Estamos fechados 😕
+Nosso horário de atendimento é
+*Segunda-Feira* | *Domingo* 
+a partir das *08h00* às *18h00*.
+Deixe sua mensagem e responderemos assim que possível.
+Agradecemos a preferência ❣`
+
+        await sendMessageWTyping(sender, { text: closed })
       }
+
+      replyCache.set(sender, true)
+      console.log(`Mensagem enviada para ${sender} às ${now.toLocaleString('pt-BR')}`)
     }
   })
 
